@@ -1,0 +1,4 @@
+subliminal>=2.2
+babelfish
+srt
+pyinstaller  # tylko do budowania

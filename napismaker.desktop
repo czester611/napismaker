@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=napismaker
+Comment=Wyszukiwanie i tłumaczenie napisów
+Exec=/home/piotrb/.local/bin/napismaker
+Terminal=false
+Categories=AudioVideo;Video;
