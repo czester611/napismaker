@@ -5,3 +5,4 @@ Comment=Wyszukiwanie i tłumaczenie napisów
 Exec=/home/piotrb/.local/bin/napismaker
 Terminal=false
 Categories=AudioVideo;Video;
+Icon=/home/piotrb/.local/share/icons/napismaker.png

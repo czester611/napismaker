@@ -7,6 +7,7 @@ import json
 import queue
 import re
 import shutil
+import sys
 import subprocess
 import threading
 import time
@@ -33,6 +34,11 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("napismaker - tłumacz napisów")
+        try:
+            icon = Path(getattr(sys, "_MEIPASS", Path(__file__).parent)) / "icon.png"
+            self.iconphoto(True, tk.PhotoImage(file=str(icon)))
+        except Exception:
+            pass
         self.geometry("900x640")
         self.q = queue.Queue()
         self.stop_flag = threading.Event()

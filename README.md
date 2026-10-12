@@ -16,4 +16,5 @@ Przy starcie program proponuje doinstalowanie brakujących narzędzi (mkvtoolnix
 ## Budowanie binarki
     pyinstaller --onefile --windowed --name napismaker \
       --collect-all subliminal --collect-all babelfish --collect-all guessit \
-      --collect-all rebulk --collect-all dogpile.cache --collect-all enzyme napismaker_gui.py
+      --collect-all rebulk --collect-all dogpile.cache --collect-all enzyme \
+      --add-data icon.png:. napismaker_gui.py
