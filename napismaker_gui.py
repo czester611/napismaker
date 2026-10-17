@@ -65,8 +65,11 @@ class App(tk.Tk):
         self.var_numctx = tk.IntVar(value=8192)
         self.var_limit = tk.IntVar(value=0)
         self.var_host = tk.StringVar(value=HOST)
+        self.var_strip = tk.BooleanVar(value=False)
+        self.var_patterns = tk.StringVar(value="\n".join(nm.SOUND_PATTERNS))
         self._load_settings()
         self.var_status = tk.StringVar(value="Gotowy.")
+        self.busy = 0
 
         self._build()
         self.after(100, self._poll)
@@ -91,6 +94,7 @@ class App(tk.Tk):
 
     def _install_tools(self, missing):
         log = lambda s, tag="info": self.q.put(("log", s, tag))
+        self.q.put(("busy", "Instaluję brakujące narzędzia..."))
         for tool in missing:
             log(f"Instaluję {tool}...\n")
             if tool == "mkvtoolnix":
@@ -104,6 +108,7 @@ class App(tk.Tk):
                 log(f"Zainstalowano {tool}.\n")
             except Exception as e:
                 log(f"Nie udało się zainstalować {tool}: {e}\n", "err")
+        self.q.put(("unbusy", "Gotowy."))
         self.q.put(("refresh",))
 
     # ---------- UI ----------
@@ -178,26 +183,35 @@ class App(tk.Tk):
         ttk.Label(adv, text="  Limit wpisów (0 = wszystkie):").pack(side="left")
         ttk.Spinbox(adv, from_=0, to=100000, width=7, textvariable=self.var_limit).pack(side="left", padx=3)
 
+        sd = ttk.LabelFrame(f, text="Opisy dźwięków", padding=6)
+        sd.grid(row=6, column=0, columnspan=3, sticky="ew", pady=4)
+        sd.columnconfigure(1, weight=1)
+        ttk.Checkbutton(sd, text="Usuń opisy dźwięków przed tłumaczeniem", variable=self.var_strip).grid(row=0, column=0, sticky="nw")
+        self.txt_pat = tk.Text(sd, height=3, width=40, font=("monospace", 9))
+        self.txt_pat.grid(row=0, column=1, sticky="ew", padx=5)
+        self.txt_pat.insert("1.0", self.var_patterns.get())
+        ttk.Label(sd, text="Wzory (regex), jeden na linię.\nDomyślny: WYRAZ DUŻYMI LITERAMI w [ ]", foreground="#777777").grid(row=0, column=2, sticky="w")
+
         host = ttk.Frame(f)
-        host.grid(row=6, column=0, columnspan=3, sticky="ew", pady=2)
+        host.grid(row=7, column=0, columnspan=3, sticky="ew", pady=2)
         host.columnconfigure(1, weight=1)
         ttk.Label(host, text="Adres Ollamy:").grid(row=0, column=0, sticky="w")
         ttk.Entry(host, textvariable=self.var_host).grid(row=0, column=1, sticky="ew", padx=5)
 
         btns = ttk.Frame(f)
-        btns.grid(row=7, column=0, columnspan=3, sticky="w", pady=4)
+        btns.grid(row=8, column=0, columnspan=3, sticky="w", pady=4)
         self.btn_start = ttk.Button(btns, text="Tłumacz", command=self._start)
         self.btn_start.pack(side="left")
         self.btn_stop = ttk.Button(btns, text="Stop", command=self.stop_flag.set, state="disabled")
         self.btn_stop.pack(side="left", padx=5)
 
         self.bar = ttk.Progressbar(f, maximum=100)
-        self.bar.grid(row=8, column=0, columnspan=3, sticky="ew", pady=4)
-        ttk.Label(f, textvariable=self.var_status).grid(row=9, column=0, columnspan=3, sticky="w")
+        self.bar.grid(row=9, column=0, columnspan=3, sticky="ew", pady=4)
+        ttk.Label(f, textvariable=self.var_status).grid(row=10, column=0, columnspan=3, sticky="w")
 
-        f.rowconfigure(10, weight=1)
+        f.rowconfigure(11, weight=1)
         box = ttk.Frame(f)
-        box.grid(row=10, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
+        box.grid(row=11, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
         self.log = tk.Text(box, wrap="word", state="disabled", font=("monospace", 10))
         sb = ttk.Scrollbar(box, command=self.log.yview)
         self.log.configure(yscrollcommand=sb.set)
@@ -234,13 +248,15 @@ class App(tk.Tk):
             if not folder:
                 return
             ok = []
-            for f in conv.OUTPUT_FORMATS:
+            for i, f in enumerate(conv.OUTPUT_FORMATS):
+                self._set_progress(100 * i / len(conv.OUTPUT_FORMATS), f"Konwersja do {f}...")
                 try:
                     d = Path(folder) / Path(conv.default_dest(src, f)).name
                     n = conv.convert(src, d, f, self.var_cfps.get(), self.var_cenc.get())
                     ok.append(f)
                 except Exception as e:
                     self.q.put(("log", f"Błąd konwersji do {f}: {e}\n", "err"))
+            self._set_progress(100, "Konwersja zakończona.")
             self.q.put(("log", f"Skonwertowano {n} wpisów do formatów: {', '.join(ok)} -> {folder} ({self.var_cenc.get()})\n", "info"))
             return
         dst = filedialog.asksaveasfilename(initialfile=Path(conv.default_dest(src, fmt)).name,
@@ -248,10 +264,18 @@ class App(tk.Tk):
         if not dst:
             return
         try:
+            self._set_progress(0, f"Konwersja do {fmt}...")
             n = conv.convert(src, dst, fmt, self.var_cfps.get(), self.var_cenc.get())
+            self._set_progress(100, "Konwersja zakończona.")
             self.q.put(("log", f"Skonwertowano {n} wpisów -> {dst} ({fmt}, {self.var_cenc.get()})\n", "info"))
         except Exception as e:
             self.q.put(("log", f"Błąd konwersji: {e}\n", "err"))
+
+    def _set_progress(self, value, status):
+        self.bar.stop()
+        self.bar.configure(mode="determinate", value=value)
+        self.var_status.set(status)
+        self.update_idletasks()
 
     # ---------- MKV ----------
     def _pick_mkv(self):
@@ -274,11 +298,14 @@ class App(tk.Tk):
 
     def _do_search(self, mkv):
         log = lambda s: self.q.put(("log", s, "info"))
+        self.q.put(("busy", "Szukam napisów..."))
         try:
             code, path = subs.find_subtitles(mkv, log)
         except Exception as e:
             self.q.put(("log", f"Błąd subliminal: {e}\n", "err"))
             return
+        finally:
+            self.q.put(("unbusy", "Gotowy."))
         if not code:
             self.q.put(("log", "Nie znaleziono napisów PL ani EN.\n", "err"))
         elif code == "pl":
@@ -289,6 +316,7 @@ class App(tk.Tk):
             self.q.put(("translate", str(path)))
 
     def _scan_mkv(self, mkv):
+        self.q.put(("busy", "Odczytuję ścieżki napisów..."))
         try:
             r = subprocess.run(["mkvmerge", "-J", mkv], capture_output=True, text=True, check=True)
             tracks = {}
@@ -304,6 +332,8 @@ class App(tk.Tk):
             self.q.put(("log", "Brak mkvmerge - zainstaluj mkvtoolnix (sudo apt install mkvtoolnix).\n", "err"))
         except Exception as e:
             self.q.put(("log", f"Nie można odczytać pliku MKV: {getattr(e, 'stderr', '') or e}\n", "err"))
+        finally:
+            self.q.put(("unbusy", "Gotowy."))
 
     def _extract(self):
         label = self.var_track.get()
@@ -325,9 +355,21 @@ class App(tk.Tk):
     def _do_extract(self, mkv, tid, dest):
         self.q.put(("log", f"Wyciągam ścieżkę {tid} -> {dest.name}...\n", "info"))
         try:
-            r = subprocess.run(["mkvextract", "tracks", str(mkv), f"{tid}:{dest}"], capture_output=True, text=True)
-            if r.returncode not in (0, 1):
-                raise RuntimeError(r.stdout + r.stderr)
+            self.q.put(("progress", 0))
+            p = subprocess.Popen(["mkvextract", "--gui-mode", "tracks", str(mkv), f"{tid}:{dest}"],
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            out = []
+            for line in p.stdout:
+                m = re.match(r"#GUI#progress (\d+)%", line)
+                if m:
+                    self.q.put(("progress", int(m.group(1))))
+                    self.q.put(("status", f"Wyciąganie napisów: {m.group(1)}%"))
+                else:
+                    out.append(line)
+            if p.wait() not in (0, 1):
+                raise RuntimeError("".join(out))
+            self.q.put(("progress", 100))
+            self.q.put(("status", f"Wyciągnięto: {dest.name}"))
             self.q.put(("input", str(dest)))
             self.q.put(("log", f"Gotowe, ustawiono jako plik źródłowy: {dest}\n", "info"))
         except FileNotFoundError:
@@ -351,8 +393,9 @@ class App(tk.Tk):
             pass
 
     def _save_settings(self):
-        keys = ["autosub", "call", "cfmt", "cenc", "cfps", "mkv", "in", "out", "model", "lang", "batch", "ctx", "verbose", "temp", "numctx", "limit", "host"]
+        keys = ["autosub", "call", "cfmt", "cenc", "cfps", "mkv", "in", "out", "model", "lang", "batch", "ctx", "verbose", "temp", "numctx", "limit", "host", "strip", "patterns"]
         try:
+            self.var_patterns.set(self.txt_pat.get("1.0", "end").strip())
             d = {k: getattr(self, "var_" + k).get() for k in keys}
             SETTINGS.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
         except Exception:
@@ -367,6 +410,7 @@ class App(tk.Tk):
         threading.Thread(target=self._load_models, args=(self.var_host.get(),), daemon=True).start()
 
     def _load_models(self, host):
+        self.q.put(("busy", "Łączę z Ollamą..."))
         try:
             nm.ensure_ollama(host)
             self.q.put(("models", nm.installed_models(host)))
@@ -374,6 +418,8 @@ class App(tk.Tk):
             self.q.put(("log", f"{e}\n", "err"))
         except Exception as e:
             self.q.put(("log", f"Nie można pobrać listy modeli: {e}\n", "err"))
+        finally:
+            self.q.put(("unbusy", "Gotowy."))
 
     # ---------- kolejka zdarzeń z wątku ----------
     def _poll(self):
@@ -404,7 +450,23 @@ class App(tk.Tk):
                     self.var_lang.set(LANG_LABELS["en"])
                     if not self.btn_start["state"] == "disabled":
                         self._start()
+                elif kind == "busy":
+                    self.busy += 1
+                    self.var_status.set(rest[0])
+                    if self.busy == 1:
+                        self.bar.configure(mode="indeterminate")
+                        self.bar.start(12)
+                elif kind == "unbusy":
+                    self.busy = max(0, self.busy - 1)
+                    if self.busy == 0:
+                        self.bar.stop()
+                        self.bar.configure(mode="determinate")
+                        if self.btn_start["state"] != "disabled":
+                            self.bar["value"] = 0
+                            self.var_status.set(rest[0])
                 elif kind == "progress":
+                    if self.busy == 0:
+                        self.bar.configure(mode="determinate")
                     self.bar["value"] = rest[0]
                 elif kind == "status":
                     self.var_status.set(rest[0])
@@ -429,8 +491,19 @@ class App(tk.Tk):
             context=self.var_ctx.get(), num_ctx=self.var_numctx.get(), temperature=self.var_temp.get(),
             lang=next((k for k, v in LANG_LABELS.items() if v == self.var_lang.get()), "en"),
             verbose=self.var_verbose.get(), limit=self.var_limit.get() or None,
+            strip_patterns=self.var_patterns.get().splitlines() if self.var_strip.get() else None,
         )
         self._save_settings()
+        if args.strip_patterns:
+            args.strip_patterns = self.var_patterns.get().splitlines()
+            try:
+                for pat in args.strip_patterns:
+                    re.compile(pat)
+            except re.error as e:
+                messagebox.showerror("Błędny wzór", f"Niepoprawne wyrażenie regularne: {e}")
+                self.btn_start.configure(state="normal")
+                self.btn_stop.configure(state="disabled")
+                return
         self.worker = threading.Thread(
             target=self._run, args=(args, Path(self.var_in.get()), Path(self.var_out.get()), self.var_fresh.get()), daemon=True)
         self.worker.start()
@@ -439,7 +512,12 @@ class App(tk.Tk):
         log = lambda s, tag=(): self.q.put(("log", s, tag))
         try:
             nm.ensure_ollama(args.host)
-            entries = nm.parse_srt(inp)[: args.limit]
+            entries = nm.parse_srt(inp)
+            if args.strip_patterns:
+                before = len(entries)
+                entries = nm.strip_sounds(entries, args.strip_patterns)
+                log(f"Usunięto opisy dźwięków: {before - len(entries)} wpisów w całości.\n", "info")
+            entries = entries[: args.limit]
             cache = out.with_suffix(".cache.tsv")
             if fresh and cache.exists():
                 cache.unlink()

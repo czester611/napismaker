@@ -54,11 +54,30 @@ def parse_srt(path):
     return entries
 
 
-def write_srt(path, entries, tr):
+# domyślny wzór: tekst w [] bez małych liter, np. [DOOR SLAMS] albo [MUSIC PLAYING]
+SOUND_PATTERNS = [r"\[(?=[^\]]*[A-ZÀ-ÖØ-ÞĄĆĘŁŃŚŹŻ])[^\]a-zß-öø-ÿąćęłńśźż]*\]"]
+
+
+def strip_sounds(entries, patterns):
+    """Usuwa z wpisów opisy dźwięków pasujące do wzorów (regex); puste wpisy znikają."""
+    regs = [re.compile(p) for p in patterns if p.strip()]
     out = []
     for e in entries:
+        text = e["text"]
+        for r in regs:
+            text = r.sub("", text)
+        lines = [l.strip() for l in text.split(BR.strip())]
+        lines = [l for l in lines if re.search(r"\w", l)]
+        if lines:
+            out.append({**e, "text": BR.join(lines)})
+    return out
+
+
+def write_srt(path, entries, tr):
+    out = []
+    for i, e in enumerate(entries, 1):
         body = tr.get(e["n"], e["text"]).replace(BR.strip(), "\n").replace(" \n", "\n").replace("\n ", "\n")
-        out.append(f"{e['n']}\n{e['time']}\n{body}\n")
+        out.append(f"{i}\n{e['time']}\n{body}\n")
     Path(path).write_text("\n".join(out), encoding="utf-8")
 
 
