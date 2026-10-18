@@ -5,24 +5,38 @@ Kolejność: napisy polskie; jeśli ich nie ma - angielskie (do przetłumaczenia
 from pathlib import Path
 
 from babelfish import Language
-from subliminal import Video, download_best_subtitles, region, save_subtitles, scan_video
+from guessit import guessit
+from subliminal import Episode, Movie, Video, download_best_subtitles, region, save_subtitles, scan_video
 
-# dostawcy niewymagający konta
-PROVIDERS = ["napiprojekt", "podnapisi", "gestdown", "tvsubtitles"]
+# dostawcy niewymagający konta (dla filmów i seriali); gestdown/tvsubtitles tylko seriale
+MOVIE_PROVIDERS = ["napiprojekt", "opensubtitles", "podnapisi"]
+EPISODE_PROVIDERS = MOVIE_PROVIDERS + ["gestdown", "tvsubtitles"]
 
 if not region.is_configured:
     region.configure("dogpile.cache.memory")
 
 
 def _video(path):
+    """Obiekt Video; typ (film/serial) ustalany z samej nazwy pliku, bo katalogi nadrzędne mylą guessit."""
+    path = Path(path)
+    guess = guessit(path.name)
     try:
-        return scan_video(str(path))
+        video = scan_video(str(path))
     except Exception:
-        return Video.fromname(str(path))
+        video = Video.fromname(str(path))
+    if guess.get("type") == "movie" and isinstance(video, Episode) and guess.get("title"):
+        movie = Movie.fromguess(str(path), guess)
+        movie.size, movie.hashes = video.size, video.hashes
+        return movie
+    return video
+
+
+def providers_for(video):
+    return EPISODE_PROVIDERS if isinstance(video, Episode) else MOVIE_PROVIDERS
 
 
 def _fetch(video, lang, directory):
-    found = download_best_subtitles({video}, {Language(lang)}, providers=PROVIDERS).get(video, [])
+    found = download_best_subtitles({video}, {Language(lang)}, providers=providers_for(video)).get(video, [])
     if not found:
         return None
     save_subtitles(video, found, directory=str(directory), encoding="utf-8")
@@ -40,7 +54,8 @@ def find_subtitles(video_path, log=lambda s: None):
     video_path = Path(video_path)
     video = _video(video_path)
     for code, lang in (("pl", "pol"), ("en", "eng")):
-        log(f"Szukam napisów ({code}) w: {', '.join(PROVIDERS)}...\n")
+        log(f"Szukam napisów ({code}) dla: {getattr(video, 'title', video.name)} {getattr(video, 'year', '') or ''} "
+            f"w: {', '.join(providers_for(video))}...\n")
         try:
             dest = _fetch(video, lang, video_path.parent)
         except Exception as e:
