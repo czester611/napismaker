@@ -12,12 +12,14 @@ import subprocess
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from argparse import Namespace
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 import napismaker as nm
 import napismaker_convert as conv
+import napismaker_ratings as rat
 import napismaker_subs as subs
 
 DEFAULT_MODEL = "gemma4:31b"
@@ -39,7 +41,7 @@ class App(tk.Tk):
             self.iconphoto(True, tk.PhotoImage(file=str(icon)))
         except Exception:
             pass
-        self.geometry("900x640")
+        self.geometry("1000x700")
         self.q = queue.Queue()
         self.stop_flag = threading.Event()
         self.worker = None
@@ -66,10 +68,18 @@ class App(tk.Tk):
         self.var_limit = tk.IntVar(value=0)
         self.var_host = tk.StringVar(value=HOST)
         self.var_strip = tk.BooleanVar(value=False)
+        self.var_rpath = tk.StringVar()
+        self.var_rfilter = tk.StringVar()
+        self.var_rforce = tk.BooleanVar(value=False)
+        self.var_ronly = tk.StringVar(value="Wszystkie")
+        self.var_rstatus = tk.StringVar(value="Wybierz film lub katalog z filmami.")
         self.var_patterns = tk.StringVar(value="\n".join(nm.SOUND_PATTERNS))
         self._load_settings()
         self.var_status = tk.StringVar(value="Gotowy.")
         self.busy = 0
+        self.films = rat.load_catalog()
+        self.rat_stop = threading.Event()
+        self.rat_sort = ("avg", True)
 
         self._build()
         self.after(100, self._poll)
@@ -113,7 +123,12 @@ class App(tk.Tk):
 
     # ---------- UI ----------
     def _build(self):
-        mk = ttk.LabelFrame(self, text="Wyciągnij napisy z filmu (MKV)", padding=8)
+        self.nb = ttk.Notebook(self)
+        self.nb.pack(fill="both", expand=True)
+        tab = ttk.Frame(self.nb)
+        self.nb.add(tab, text="Napisy")
+        self._build_ratings()
+        mk = ttk.LabelFrame(tab, text="Wyciągnij napisy z filmu (MKV)", padding=8)
         mk.pack(fill="x", padx=10, pady=(10, 0))
         mk.columnconfigure(1, weight=1)
         ttk.Label(mk, text="Film MKV:").grid(row=0, column=0, sticky="w", pady=2)
@@ -128,7 +143,7 @@ class App(tk.Tk):
                         variable=self.var_autosub).grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
         ttk.Button(mk, text="Szukaj napisów", command=self._search_subs).grid(row=2, column=2, pady=(4, 0))
 
-        cv = ttk.LabelFrame(self, text="Konwersja formatu napisów", padding=8)
+        cv = ttk.LabelFrame(tab, text="Konwersja formatu napisów", padding=8)
         cv.pack(fill="x", padx=10, pady=(10, 0))
         cv.columnconfigure(1, weight=1)
         ttk.Label(cv, text="Plik napisów:").grid(row=0, column=0, sticky="w", pady=2)
@@ -145,7 +160,7 @@ class App(tk.Tk):
         ttk.Checkbutton(cv, text="Konwertuj do wszystkich formatów (" + ", ".join(conv.OUTPUT_FORMATS) + ")",
                         variable=self.var_call).grid(row=2, column=0, columnspan=8, sticky="w", pady=(4, 0))
 
-        f = ttk.Frame(self, padding=10)
+        f = ttk.Frame(tab, padding=10)
         f.pack(fill="both", expand=True)
         f.columnconfigure(1, weight=1)
 
@@ -221,6 +236,193 @@ class App(tk.Tk):
         self.log.tag_configure("pl", foreground="#0a6b0a")
         self.log.tag_configure("info", foreground="#1a4fb0")
         self.log.tag_configure("err", foreground="#b00020")
+
+    # ---------- oceny filmów ----------
+    RCOLS = [("title", "Tytuł", 300, "w"), ("year", "Rok", 55, "center"), ("imdb", "IMDb", 70, "center"),
+             ("fw", "Filmweb", 70, "center"), ("avg", "Średnia", 70, "center"),
+             ("audio", "Audio PL", 80, "center"), ("subs", "Napisy PL", 80, "center"), ("file", "Plik", 300, "w")]
+
+    def _build_ratings(self):
+        tab = ttk.Frame(self.nb, padding=10)
+        self.nb.add(tab, text="Oceny filmów")
+        tab.columnconfigure(1, weight=1)
+        tab.rowconfigure(3, weight=1)
+
+        ttk.Label(tab, text="Film / katalog:").grid(row=0, column=0, sticky="w")
+        ttk.Entry(tab, textvariable=self.var_rpath).grid(row=0, column=1, sticky="ew", padx=5)
+        bf = ttk.Frame(tab)
+        bf.grid(row=0, column=2, sticky="e")
+        ttk.Button(bf, text="Film...", command=self._pick_rfile).pack(side="left")
+        ttk.Button(bf, text="Katalog...", command=self._pick_rdir).pack(side="left", padx=3)
+        self.btn_rscan = ttk.Button(bf, text="Skanuj i pobierz oceny", command=self._scan_ratings)
+        self.btn_rscan.pack(side="left")
+        self.btn_rstop = ttk.Button(bf, text="Stop", command=self.rat_stop.set, state="disabled")
+        self.btn_rstop.pack(side="left", padx=3)
+
+        opt = ttk.Frame(tab)
+        opt.grid(row=1, column=0, columnspan=3, sticky="ew", pady=4)
+        ttk.Checkbutton(opt, text="Pobierz oceny od nowa", variable=self.var_rforce).pack(side="left")
+        ttk.Label(opt, text="   Pokaż:").pack(side="left")
+        cb = ttk.Combobox(opt, textvariable=self.var_ronly, state="readonly", width=24,
+                          values=["Wszystkie", "Z polskim audio", "Z polskimi napisami", "Audio lub napisy PL", "Bez polskiej wersji"])
+        cb.pack(side="left", padx=5)
+        cb.bind("<<ComboboxSelected>>", lambda e: self._fill_films())
+        ttk.Label(opt, text="  Szukaj:").pack(side="left")
+        ent = ttk.Entry(opt, textvariable=self.var_rfilter, width=24)
+        ent.pack(side="left", padx=5)
+        self.var_rfilter.trace_add("write", lambda *a: self._fill_films())
+        ttk.Label(opt, text="♫ PL = polskie audio (lektor/dubbing)   ▤ PL = polskie napisy", foreground="#777777").pack(side="right")
+
+        self.rbar = ttk.Progressbar(tab, maximum=100)
+        self.rbar.grid(row=2, column=0, columnspan=3, sticky="ew", pady=2)
+
+        box = ttk.Frame(tab)
+        box.grid(row=3, column=0, columnspan=3, sticky="nsew", pady=(4, 0))
+        self.tree = ttk.Treeview(box, columns=[c[0] for c in self.RCOLS], show="headings", selectmode="browse")
+        for key, text, w, anc in self.RCOLS:
+            self.tree.heading(key, text=text, command=lambda k=key: self._sort_films(k))
+            self.tree.column(key, width=w, anchor=anc, stretch=key in ("title", "file"))
+        sb = ttk.Scrollbar(box, command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.tree.pack(side="left", fill="both", expand=True)
+        self.tree.tag_configure("good", foreground="#0a6b0a")
+        self.tree.tag_configure("none", foreground="#888888")
+        self.tree.bind("<Double-1>", self._play_film)
+        self.tree.bind("<Return>", self._play_film)
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Odtwórz", command=self._play_film)
+        menu.add_command(label="Strona IMDb", command=lambda: self._film_page("imdb"))
+        menu.add_command(label="Strona Filmweb", command=lambda: self._film_page("fw"))
+        menu.add_command(label="Pokaż w katalogu", command=lambda: self._film_page("dir"))
+        menu.add_command(label="Odśwież oceny tego filmu", command=self._refresh_film)
+        menu.add_command(label="Usuń z katalogu", command=self._remove_film)
+
+        def popup(e):
+            row = self.tree.identify_row(e.y)
+            if row:
+                self.tree.selection_set(row)
+                menu.tk_popup(e.x_root, e.y_root)
+        self.tree.bind("<Button-3>", popup)
+
+        ttk.Label(tab, textvariable=self.var_rstatus).grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        self._fill_films()
+
+    def _pick_rfile(self):
+        p = filedialog.askopenfilename(filetypes=[("Filmy", " ".join("*" + e for e in sorted(rat.VIDEO_EXT))), ("Wszystkie", "*.*")])
+        if p:
+            self.var_rpath.set(p)
+            self._scan_ratings()
+
+    def _pick_rdir(self):
+        p = filedialog.askdirectory(initialdir=self.var_rpath.get() or str(Path.home()))
+        if p:
+            self.var_rpath.set(p)
+            self._scan_ratings()
+
+    def _scan_ratings(self):
+        path = self.var_rpath.get().strip()
+        if not path or not Path(path).exists():
+            messagebox.showwarning("Brak ścieżki", "Wybierz istniejący film lub katalog z filmami.")
+            return
+        self.rat_stop.clear()
+        self.btn_rscan.configure(state="disabled")
+        self.btn_rstop.configure(state="normal")
+        self.rbar["value"] = 0
+        self._save_settings()
+        threading.Thread(target=self._do_scan_ratings, args=(path, self.var_rforce.get()), daemon=True).start()
+
+    def _do_scan_ratings(self, path, force):
+        self.q.put(("rstatus", "Szukam plików wideo..."))
+
+        def progress(done, total, text):
+            self.q.put(("rprogress", 100 * done / total))
+            self.q.put(("rstatus", f"{done}/{total}: {text}"))
+        try:
+            rat.scan(path, self.films, force, progress, self.rat_stop.is_set)
+            rat.save_catalog(self.films)
+            n = sum(1 for k in self.films if k.startswith(path))
+            self.q.put(("rprogress", 100))
+            self.q.put(("rstatus", ("Przerwano. " if self.rat_stop.is_set() else "Gotowe. ") + f"Filmów w katalogu: {len(self.films)} (w tej ścieżce: {n})."))
+            self.q.put(("rrefresh",))
+        except Exception as e:
+            self.q.put(("rstatus", f"Błąd: {e}"))
+        finally:
+            self.q.put(("rdone",))
+
+    def _fill_films(self):
+        text = self.var_rfilter.get().strip().lower()
+        only = self.var_ronly.get()
+        rows = []
+        for rec in self.films.values():
+            a, s = rec.get("pl_audio"), rec.get("pl_subs")
+            if only == "Z polskim audio" and not a or only == "Z polskimi napisami" and not s \
+                    or only == "Audio lub napisy PL" and not (a or s) or only == "Bez polskiej wersji" and (a or s):
+                continue
+            if text and text not in (rec.get("title", "") + " " + Path(rec["path"]).name).lower():
+                continue
+            rows.append(rec)
+        key, rev = self.rat_sort
+        keyf = {"title": lambda r: r.get("title", "").lower(), "year": lambda r: r.get("year") or 0,
+                "imdb": lambda r: r.get("imdb_rate") or 0, "fw": lambda r: r.get("fw_rate") or 0,
+                "avg": lambda r: rat.average(r) or 0, "audio": lambda r: bool(r.get("pl_audio")),
+                "subs": lambda r: bool(r.get("pl_subs")), "file": lambda r: Path(r["path"]).name.lower()}[key]
+        rows.sort(key=keyf, reverse=rev)
+        self.tree.delete(*self.tree.get_children())
+        fmt = lambda v: f"{v:.1f}" if v else "-"
+        for r in rows:
+            avg = rat.average(r)
+            self.tree.insert("", "end", iid=r["path"], tags=("good" if avg and avg >= 7.5 else "" if avg else "none",), values=(
+                r.get("title", ""), r.get("year") or "", fmt(r.get("imdb_rate")), fmt(r.get("fw_rate")), fmt(avg),
+                "♫ PL" if r.get("pl_audio") else "–", "▤ PL" if r.get("pl_subs") else "–", Path(r["path"]).name))
+        if self.films:
+            self.var_rstatus.set(f"Wyświetlono {len(rows)} z {len(self.films)} filmów. Dwuklik = odtwórz, prawy przycisk = menu.")
+
+    def _sort_films(self, key):
+        self.rat_sort = (key, not self.rat_sort[1] if self.rat_sort[0] == key else key not in ("title", "file"))
+        self._fill_films()
+
+    def _selected_film(self):
+        sel = self.tree.selection()
+        return self.films.get(sel[0]) if sel else None
+
+    def _play_film(self, event=None):
+        rec = self._selected_film()
+        if not rec:
+            return
+        if not Path(rec["path"]).exists():
+            messagebox.showwarning("Brak pliku", f"Plik nie istnieje (dysk odmontowany?):\n{rec['path']}")
+            return
+        rat.open_default(rec["path"])
+        self.var_rstatus.set(f"Odtwarzam: {rec.get('title')}")
+
+    def _film_page(self, what):
+        rec = self._selected_film()
+        if not rec:
+            return
+        if what == "dir":
+            rat.open_default(Path(rec["path"]).parent)
+        elif what == "imdb" and rec.get("imdb_id"):
+            webbrowser.open(f"https://www.imdb.com/title/{rec['imdb_id']}/")
+        elif what == "fw" and rec.get("fw_id"):
+            webbrowser.open(f"https://www.filmweb.pl/film/-{rec.get('year') or ''}-{rec['fw_id']}")
+        else:
+            self.var_rstatus.set("Brak tej strony - nie znaleziono filmu w tym serwisie.")
+
+    def _refresh_film(self):
+        rec = self._selected_film()
+        if rec:
+            self.var_rpath.set(rec["path"])
+            self.var_rforce.set(True)
+            self._scan_ratings()
+            self.var_rforce.set(False)
+
+    def _remove_film(self):
+        rec = self._selected_film()
+        if rec:
+            self.films.pop(rec["path"], None)
+            rat.save_catalog(self.films)
+            self._fill_films()
 
     def _pick_in(self):
         p = filedialog.askopenfilename(filetypes=[("Napisy SRT", "*.srt"), ("Wszystkie", "*.*")])
@@ -393,7 +595,7 @@ class App(tk.Tk):
             pass
 
     def _save_settings(self):
-        keys = ["autosub", "call", "cfmt", "cenc", "cfps", "mkv", "in", "out", "model", "lang", "batch", "ctx", "verbose", "temp", "numctx", "limit", "host", "strip", "patterns"]
+        keys = ["autosub", "call", "cfmt", "cenc", "cfps", "mkv", "in", "out", "model", "lang", "batch", "ctx", "verbose", "temp", "numctx", "limit", "host", "strip", "patterns", "rpath", "rforce", "ronly"]
         try:
             self.var_patterns.set(self.txt_pat.get("1.0", "end").strip())
             d = {k: getattr(self, "var_" + k).get() for k in keys}
@@ -464,6 +666,15 @@ class App(tk.Tk):
                         if self.btn_start["state"] != "disabled":
                             self.bar["value"] = 0
                             self.var_status.set(rest[0])
+                elif kind == "rprogress":
+                    self.rbar["value"] = rest[0]
+                elif kind == "rstatus":
+                    self.var_rstatus.set(rest[0])
+                elif kind == "rrefresh":
+                    self._fill_films()
+                elif kind == "rdone":
+                    self.btn_rscan.configure(state="normal")
+                    self.btn_rstop.configure(state="disabled")
                 elif kind == "progress":
                     if self.busy == 0:
                         self.bar.configure(mode="determinate")

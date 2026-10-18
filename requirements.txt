@@ -1,4 +1,5 @@
 subliminal>=2.2
 babelfish
+guessit
 srt
 pyinstaller  # tylko do budowania
