@@ -258,6 +258,7 @@ class App(tk.Tk):
         self.btn_rscan.pack(side="left")
         self.btn_rstop = ttk.Button(bf, text="Stop", command=self.rat_stop.set, state="disabled")
         self.btn_rstop.pack(side="left", padx=3)
+        ttk.Button(bf, text="Napisy do wybranego →", command=self._subs_for_film).pack(side="left")
 
         opt = ttk.Frame(tab)
         opt.grid(row=1, column=0, columnspan=3, sticky="ew", pady=4)
@@ -292,6 +293,7 @@ class App(tk.Tk):
         self.tree.bind("<Return>", self._play_film)
         menu = tk.Menu(self, tearoff=0)
         menu.add_command(label="Odtwórz", command=self._play_film)
+        menu.add_command(label="Pobierz napisy (karta Napisy)", command=self._subs_for_film)
         menu.add_command(label="Strona IMDb", command=lambda: self._film_page("imdb"))
         menu.add_command(label="Strona Filmweb", command=lambda: self._film_page("fw"))
         menu.add_command(label="Pokaż w katalogu", command=lambda: self._film_page("dir"))
@@ -483,12 +485,28 @@ class App(tk.Tk):
     def _pick_mkv(self):
         p = filedialog.askopenfilename(filetypes=[("Matroska", "*.mkv *.mks"), ("Wszystkie", "*.*")])
         if p:
-            self.var_mkv.set(p)
-            self.cb_track.set("")
-            self.cb_track["values"] = []
+            self._load_film(p)
+
+    def _load_film(self, p):
+        self.var_mkv.set(p)
+        self.cb_track.set("")
+        self.cb_track["values"] = []
+        self.tracks = {}
+        if Path(p).suffix.lower() in (".mkv", ".mks"):
             threading.Thread(target=self._scan_mkv, args=(p,), daemon=True).start()
-            if self.var_autosub.get():
-                self._search_subs()
+        if self.var_autosub.get():
+            self._search_subs()
+
+    def _subs_for_film(self):
+        rec = self._selected_film()
+        if not rec:
+            messagebox.showinfo("Wybierz film", "Zaznacz film na liście.")
+            return
+        if not Path(rec["path"]).exists():
+            messagebox.showwarning("Brak pliku", f"Plik nie istnieje (dysk odmontowany?):\n{rec['path']}")
+            return
+        self.nb.select(0)
+        self._load_film(rec["path"])
 
     # ---------- subliminal ----------
     def _search_subs(self):
